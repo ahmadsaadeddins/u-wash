@@ -1,9 +1,10 @@
 const $ = id => document.getElementById(id);
 let socket;
 let micStream, micContext, micNode;
-let playingContext, playAt = 0, streamRate = 48000;
+let playingContext, outputStream, outputElement, playAt = 0, streamRate = 48000;
 let latestClipboard = '';
 let meterTimer;
+let reconnectEnabled = true;
 
 function status(message, bad = false) { $('connection').textContent = message; $('connection').classList.toggle('off', bad); }
 async function api(url, options = {}) {
@@ -15,6 +16,7 @@ async function init() {
   try {
     const { paired } = await api('/api/session');
     $('pairView').hidden = paired; $('appView').hidden = !paired;
+    $('logoutButton').hidden = !paired;
     if (paired) { status('Connected'); connectSocket(); await Promise.all([refreshFiles(), refreshClipboard()]); }
     else status('Pairing needed', true);
   } catch { status('Server unavailable', true); }
@@ -28,7 +30,16 @@ function connectSocket() {
   socket = new WebSocket(`wss://${location.host}/ws`);
   socket.binaryType = 'arraybuffer';
   socket.onopen = () => status('Connected');
-  socket.onclose = () => { status('Reconnecting', true); if (micStream) stopMic(); setTimeout(connectSocket, 2000); };
+  socket.onclose = async () => {
+    if (micStream) stopMic();
+    if (!reconnectEnabled) return;
+    status('Reconnecting', true);
+    try {
+      const { paired } = await api('/api/session');
+      if (!paired) { reconnectEnabled = false; $('pairView').hidden = false; $('appView').hidden = true; $('logoutButton').hidden = true; status('Pairing needed', true); return; }
+    } catch { /* The server may be restarting. */ }
+    setTimeout(connectSocket, 2000);
+  };
   socket.onmessage = async event => {
     if (typeof event.data !== 'string') { playSamples(event.data); return; }
     const msg = JSON.parse(event.data);
@@ -39,6 +50,11 @@ function connectSocket() {
     if (msg.type === 'files-changed') refreshFiles();
   };
 }
+$('logoutButton').onclick = async () => {
+  reconnectEnabled = false;
+  try { await api('/api/logout', { method: 'POST' }); socket?.close(); location.reload(); }
+  catch (error) { reconnectEnabled = true; status(error.message, true); }
+};
 function displayClipboard(data) {
   latestClipboard = data.text || '';
   $('clipboardText').value = latestClipboard;
@@ -88,17 +104,50 @@ $('micButton').onclick = async () => {
   if (micStream) return stopMic();
   try { await startMic(); } catch (error) { await stopMic(); $('micStatus').textContent = error.message; }
 };
+function preparePlayback() {
+  if (playingContext) return;
+  playingContext = new AudioContext();
+  outputStream = playingContext.createMediaStreamDestination();
+  outputElement = document.createElement('audio');
+  outputElement.autoplay = true;
+  outputElement.srcObject = outputStream.stream;
+  document.body.append(outputElement);
+}
 $('listenButton').onclick = async () => {
-  if (!playingContext) playingContext = new AudioContext();
-  await playingContext.resume();
-  $('listenButton').textContent = 'Sound enabled'; $('micStatus').textContent = 'Ready to play incoming microphone audio';
+  try {
+    preparePlayback();
+    if (outputElement.setSinkId) await outputElement.setSinkId('default');
+    await playingContext.resume(); await outputElement.play();
+    $('listenButton').textContent = 'Sound enabled'; $('routeStatus').textContent = 'Playing through the computer’s default speakers.';
+  } catch (error) { $('routeStatus').textContent = `Could not start sound: ${error.message}`; }
+};
+$('routeButton').onclick = async () => {
+  try {
+    if (!window.isSecureContext || !navigator.mediaDevices || !HTMLMediaElement.prototype.setSinkId) throw new Error('Open this page in desktop Chrome or Edge over HTTPS.');
+    preparePlayback();
+    let device;
+    if (navigator.mediaDevices.selectAudioOutput) {
+      device = await navigator.mediaDevices.selectAudioOutput();
+      if (!/CABLE Input|VB-Audio Virtual Cable/i.test(device.label)) throw new Error('Choose Speakers or CABLE Input (VB-Audio Virtual Cable) in the output picker.');
+    } else {
+      const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      permissionStream.getTracks().forEach(track => track.stop());
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      device = devices.find(item => item.kind === 'audiooutput' && /CABLE Input|VB-Audio Virtual Cable/i.test(item.label));
+      if (!device) throw new Error('VB-Audio Virtual Cable playback was not found. Install VB-CABLE, restart Windows, then reload this page.');
+    }
+    await outputElement.setSinkId(device.deviceId);
+    await playingContext.resume(); await outputElement.play();
+    $('routeButton').textContent = 'Virtual mic active';
+    $('routeStatus').textContent = 'Audio is going to VB-CABLE. In Codex, choose CABLE Output as the microphone.';
+  } catch (error) { $('routeStatus').textContent = error.message; }
 };
 function playSamples(arrayBuffer) {
   if (!playingContext || playingContext.state !== 'running') return;
   const floats = new Float32Array(arrayBuffer);
   const buffer = playingContext.createBuffer(1, floats.length, streamRate);
   buffer.copyToChannel(floats, 0);
-  const source = playingContext.createBufferSource(); source.buffer = buffer; source.connect(playingContext.destination);
+  const source = playingContext.createBufferSource(); source.buffer = buffer; source.connect(outputStream);
   const now = playingContext.currentTime;
   if (playAt < now || playAt > now + .4) playAt = now + .08;
   source.start(playAt); playAt += buffer.duration;

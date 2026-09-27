@@ -11,20 +11,28 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const localDir = path.join(here, '.local');
+const uploadTempDir = path.join(localDir, 'uploads');
 const sharedDir = path.join(here, 'shared');
 const publicDir = path.join(here, 'public');
 const port = Number(process.env.PORT || 8765);
+const listenHost = process.env.UWASH_HOST || '0.0.0.0';
 const pin = String(process.env.UWASH_PIN || crypto.randomInt(100000, 1000000));
-const sessions = new Set();
+const sessionLifetimeMs = 24 * 60 * 60 * 1000;
+const sessions = new Map();
 const clients = new Set();
 const failedPairs = new Map();
+const maxClients = 8;
+const maxBufferedBytes = 1024 * 1024;
 let clipboard = { text: '', updatedAt: null };
 let microphoneActive = false;
 let microphoneOwner = null;
 let microphoneRate = 48000;
+let activeUploads = 0;
 
 const addresses = [...new Set(Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal).map(x => x.address))];
+const allowedHosts = new Set(['localhost', '127.0.0.1', ...addresses].map(host => `${host}:${port}`));
 await fsp.mkdir(localDir, { recursive: true });
+await fsp.mkdir(uploadTempDir, { recursive: true });
 await fsp.mkdir(sharedDir, { recursive: true });
 const keyFile = path.join(localDir, 'key.pem');
 const certFile = path.join(localDir, 'cert.pem');
@@ -38,22 +46,41 @@ if (!fs.existsSync(keyFile) || !fs.existsSync(certFile)) {
 }
 
 function send(res, code, data, type = 'application/json; charset=utf-8') {
-  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' wss:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
   res.end(type.startsWith('application/json') ? JSON.stringify(data) : data);
 }
-function authenticated(req) {
+function sessionToken(req) {
   const match = /(?:^|;\s*)uwash=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '');
-  return !!match && sessions.has(match[1]);
+  if (!match) return null;
+  const expiry = sessions.get(match[1]);
+  if (!expiry) return null;
+  if (expiry <= Date.now()) { sessions.delete(match[1]); return null; }
+  return match[1];
 }
+function authenticated(req) { return !!sessionToken(req); }
 function sameOrigin(req) {
-  try { return new URL(req.headers.origin).host === req.headers.host; } catch { return false; }
+  try { const origin = new URL(req.headers.origin); return origin.protocol === 'https:' && origin.host === req.headers.host && allowedHosts.has(origin.host); } catch { return false; }
 }
+function allowedHost(req) { return allowedHosts.has(req.headers.host); }
 function safePath(raw) {
   if (!raw || raw.length > 1000 || raw.includes('\0')) throw new Error('Invalid path');
   const parts = raw.replaceAll('\\', '/').split('/');
   if (parts.some(p => !p || p === '.' || p === '..' || p.includes(':'))) throw new Error('Invalid path');
   const target = path.resolve(sharedDir, ...parts);
   if (path.relative(sharedDir, target).startsWith('..')) throw new Error('Invalid path');
+  return target;
+}
+async function confinedPath(target, mustExist = false) {
+  const relative = path.relative(sharedDir, target);
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Invalid path');
+  let current = sharedDir;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    try {
+      const stat = await fsp.lstat(current);
+      if (stat.isSymbolicLink()) throw new Error('Linked paths are not allowed');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; if (mustExist) throw error; }
+  }
   return target;
 }
 async function readJson(req, max = 64 * 1024) {
@@ -71,11 +98,12 @@ async function listFiles(dir = sharedDir, prefix = '', result = []) {
   return result.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 function broadcast(message, except) {
-  for (const client of clients) if (client !== except && client.readyState === WebSocket.OPEN) client.send(message);
+  for (const client of clients) if (client !== except && client.readyState === WebSocket.OPEN && client.bufferedAmount < maxBufferedBytes) client.send(message);
 }
 
 const server = https.createServer({ key: await fsp.readFile(keyFile), cert: await fsp.readFile(certFile) }, async (req, res) => {
   try {
+    if (!allowedHost(req)) return send(res, 421, { error: 'Unknown host' });
     const url = new URL(req.url, `https://${req.headers.host}`);
     if (url.pathname === '/api/session' && req.method === 'GET') return send(res, 200, { paired: authenticated(req) });
     if (url.pathname === '/api/pair' && req.method === 'POST') {
@@ -91,13 +119,22 @@ const server = https.createServer({ key: await fsp.readFile(keyFile), cert: awai
         return send(res, 401, { error: 'Wrong pairing code' });
       }
       failedPairs.delete(ip);
-      const token = crypto.randomBytes(32).toString('hex'); sessions.add(token);
-      res.writeHead(200, { 'Set-Cookie': `uwash=${token}; HttpOnly; Secure; SameSite=Strict; Path=/`, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      if (sessions.size >= 32) for (const [token, expiry] of sessions) { if (expiry <= Date.now()) sessions.delete(token); }
+      if (sessions.size >= 32) return send(res, 429, { error: 'Too many paired devices. Restart the server to clear sessions.' });
+      const token = crypto.randomBytes(32).toString('hex'); sessions.set(token, Date.now() + sessionLifetimeMs);
+      res.writeHead(200, { 'Set-Cookie': `uwash=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({ paired: true }));
     }
     if (url.pathname.startsWith('/api/')) {
       if (!authenticated(req)) return send(res, 401, { error: 'Pair first' });
       if (req.method !== 'GET' && !sameOrigin(req)) return send(res, 403, { error: 'Invalid origin' });
+      if (url.pathname === '/api/logout' && req.method === 'POST') {
+        const token = sessionToken(req);
+        sessions.delete(token);
+        for (const client of clients) if (client.sessionToken === token) client.terminate();
+        res.writeHead(200, { 'Set-Cookie': 'uwash=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0', 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        return res.end(JSON.stringify({ ok: true }));
+      }
       if (url.pathname === '/api/files' && req.method === 'GET') return send(res, 200, { files: await listFiles() });
       if (url.pathname === '/api/clipboard' && req.method === 'GET') return send(res, 200, clipboard);
       if (url.pathname === '/api/clipboard' && req.method === 'POST') {
@@ -108,24 +145,31 @@ const server = https.createServer({ key: await fsp.readFile(keyFile), cert: awai
         return send(res, 200, clipboard);
       }
       if (url.pathname === '/api/upload' && req.method === 'PUT') {
+        if (activeUploads >= 2) return send(res, 429, { error: 'Two uploads are already in progress' });
         const target = safePath(url.searchParams.get('path'));
         const max = 1024 * 1024 * 1024;
         const declared = Number(req.headers['content-length']);
         if (!Number.isFinite(declared) || declared < 0 || declared > max) return send(res, 413, { error: 'File limit is 1 GB' });
-        await fsp.mkdir(path.dirname(target), { recursive: true });
-        const temp = `${target}.${crypto.randomUUID()}.upload`;
-        let received = 0;
+        activeUploads++;
         try {
-          req.on('data', chunk => { received += chunk.length; if (received > max) req.destroy(); });
-          await pipeline(req, createWriteStream(temp, { flags: 'wx' }));
-          if (received !== declared) throw new Error('Incomplete upload');
-          await fsp.rename(temp, target);
-        } catch (error) { await fsp.rm(temp, { force: true }); throw error; }
-        broadcast(JSON.stringify({ type: 'files-changed' }));
-        return send(res, 200, { ok: true });
+          await confinedPath(target);
+          await fsp.mkdir(path.dirname(target), { recursive: true });
+          await confinedPath(target);
+          const temp = path.join(uploadTempDir, `${crypto.randomUUID()}.upload`);
+          let received = 0;
+          try {
+            req.on('data', chunk => { received += chunk.length; if (received > max) req.destroy(); });
+            await pipeline(req, createWriteStream(temp, { flags: 'wx' }));
+            if (received !== declared) throw new Error('Incomplete upload');
+            await fsp.rename(temp, target);
+          } catch (error) { await fsp.rm(temp, { force: true }); throw error; }
+          broadcast(JSON.stringify({ type: 'files-changed' }));
+          return send(res, 200, { ok: true });
+        } finally { activeUploads--; }
       }
       if (url.pathname === '/api/download' && req.method === 'GET') {
         const target = safePath(url.searchParams.get('path'));
+        await confinedPath(target, true);
         const stat = await fsp.stat(target);
         if (!stat.isFile()) return send(res, 404, { error: 'File not found' });
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': stat.size, 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(target))}`, 'X-Content-Type-Options': 'nosniff' });
@@ -144,17 +188,33 @@ const server = https.createServer({ key: await fsp.readFile(keyFile), cert: awai
     else res.destroy();
   }
 });
+server.headersTimeout = 15_000;
+server.requestTimeout = 10 * 60_000;
+server.maxHeadersCount = 50;
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 server.on('upgrade', (req, socket, head) => {
-  if (!authenticated(req) || !sameOrigin(req) || new URL(req.url, `https://${req.headers.host}`).pathname !== '/ws') return socket.destroy();
-  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+  if (!allowedHost(req) || !authenticated(req) || !sameOrigin(req) || clients.size >= maxClients || new URL(req.url, `https://${req.headers.host}`).pathname !== '/ws') return socket.destroy();
+  wss.handleUpgrade(req, socket, head, ws => { ws.sessionToken = sessionToken(req); wss.emit('connection', ws); });
 });
 wss.on('connection', ws => {
   clients.add(ws);
+  ws.isAlive = true;
+  ws.audioWindowStart = Date.now();
+  ws.audioWindowBytes = 0;
+  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('error', () => { ws.terminate(); });
   ws.send(JSON.stringify({ type: 'state', microphoneActive, microphoneRate, clipboard }));
   ws.on('message', (data, isBinary) => {
-    if (isBinary) { if (microphoneOwner === ws && data.length <= 256 * 1024) broadcast(data, ws); return; }
+    if (isBinary) {
+      if (microphoneOwner !== ws || data.length > 32768 || data.length % 4 !== 0) return;
+      if (Date.now() - ws.audioWindowStart >= 1000) { ws.audioWindowStart = Date.now(); ws.audioWindowBytes = 0; }
+      ws.audioWindowBytes += data.length;
+      if (ws.audioWindowBytes > 2 * 1024 * 1024) { ws.close(1008, 'Audio rate exceeded'); return; }
+      broadcast(data, ws);
+      return;
+    }
+    if (data.length > 512) return;
     try {
       const message = JSON.parse(data.toString());
       if (message.type === 'mic-start' && Number.isFinite(message.sampleRate) && message.sampleRate >= 8000 && message.sampleRate <= 192000) {
@@ -168,8 +228,15 @@ wss.on('connection', ws => {
   });
   ws.on('close', () => { clients.delete(ws); if (microphoneOwner === ws) { microphoneActive = false; microphoneOwner = null; broadcast(JSON.stringify({ type: 'mic-stop' })); } });
 });
+const heartbeat = setInterval(() => {
+  for (const ws of clients) {
+    if (!sessions.has(ws.sessionToken) || sessions.get(ws.sessionToken) <= Date.now() || !ws.isAlive) { ws.terminate(); continue; }
+    ws.isAlive = false; ws.ping();
+  }
+}, 30_000);
+heartbeat.unref();
 
-server.listen(port, '0.0.0.0', () => {
+server.listen(port, listenHost, () => {
   console.log(`\nu-wash is ready\nComputer: https://localhost:${port}\nPhone:    ${addresses.map(ip => `https://${ip}:${port}`).join(' or ') || 'connect to this computer on your local network'}\nPairing code: ${pin}\nShared files: ${sharedDir}\n`);
   console.log('Both devices must be on the same local network. On your phone, accept the local certificate warning once.');
 });

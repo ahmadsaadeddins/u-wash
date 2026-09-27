@@ -8,12 +8,12 @@ import { WebSocket } from 'ws';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const port = 8877;
-const child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(port), UWASH_PIN: '123456' }, stdio: 'pipe' });
+const child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(port), UWASH_HOST: '127.0.0.1', UWASH_PIN: '123456' }, stdio: 'pipe' });
 const agent = new https.Agent({ rejectUnauthorized: false });
 let cookie;
-async function request(method, route, body, type) {
+async function request(method, route, body, type, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
-    const req = https.request({ hostname: 'localhost', port, path: route, method, agent, headers: { Origin: `https://localhost:${port}`, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': type || 'application/json', 'Content-Length': body.length } : {}) } }, res => {
+    const req = https.request({ hostname: 'localhost', port, path: route, method, agent, headers: { Origin: `https://localhost:${port}`, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': type || 'application/json', 'Content-Length': body.length } : {}), ...extraHeaders } }, res => {
       const chunks = [];
       res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
@@ -35,6 +35,9 @@ async function socket() {
 }
 try {
   await ready();
+  assert.equal((await request('GET', '/', undefined, undefined, { Host: `untrusted.test:${port}` })).status, 421);
+  assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'), undefined, { Origin: 'https://untrusted.test:8877' })).status, 403);
+  assert.match((await request('GET', '/')).headers['content-security-policy'], /frame-ancestors 'none'/);
   assert.equal((await request('GET', '/api/files')).status, 401);
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"000000"}'))).status, 401);
   const pair = await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'));
@@ -45,6 +48,14 @@ try {
   assert(files.files.some(file => file.path === 'smoke-test/hello.txt'));
   assert.equal((await request('GET', '/api/download?path=smoke-test%2Fhello.txt')).body.toString(), text.toString());
   assert.equal((await request('GET', '/api/download?path=..%2Fserver.js')).status, 400);
+  const linkedFile = path.join(root, 'shared', 'smoke-test', 'linked.txt');
+  try {
+    await fs.symlink(path.join(root, 'README.md'), linkedFile, 'file');
+    assert.equal((await request('GET', '/api/download?path=smoke-test%2Flinked.txt')).status, 400);
+    assert.equal((await request('PUT', '/api/upload?path=smoke-test%2Flinked.txt', text, 'application/octet-stream')).status, 400);
+  } catch (error) {
+    if (!['EPERM', 'EACCES'].includes(error.code)) throw error;
+  } finally { await fs.rm(linkedFile, { force: true }); }
   assert.equal((await request('POST', '/api/clipboard', Buffer.from('{"text":"shared text"}'))).status, 200);
   assert.equal(JSON.parse((await request('GET', '/api/clipboard')).body).text, 'shared text');
   const sender = await socket(), receiver = await socket();
@@ -56,7 +67,9 @@ try {
   sender.send(Buffer.from([1, 2, 3, 4]));
   assert.deepEqual(Buffer.from(await gotAudio), Buffer.from([1, 2, 3, 4]));
   sender.close(); receiver.close();
-  console.log('Smoke test passed: pairing, files, clipboard, and audio relay');
+  assert.equal((await request('POST', '/api/logout')).status, 200);
+  assert.equal((await request('GET', '/api/files')).status, 401);
+  console.log('Smoke test passed: host/origin checks, pairing, file confinement, clipboard, audio relay, and logout');
 } finally {
   child.kill();
   await fs.rm(path.join(root, 'shared', 'smoke-test'), { recursive: true, force: true });
