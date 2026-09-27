@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createClient } from './helpers.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const agent = new https.Agent({ rejectUnauthorized: false });
+const STARTUP_ERROR_PREFIX = 'UWASH_STARTUP_ERROR:';
 
 function spawnServer(env) {
   const child = spawn(process.execPath, ['server.js'], {
@@ -26,19 +27,29 @@ function spawnServer(env) {
 function untilExit(child, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { child.kill(); reject(new Error('server.js did not exit in time')); }, timeoutMs);
-    child.on('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
+    // 'close' fires after the stdio streams are flushed, unlike 'exit'.
+    child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
     child.on('error', error => { clearTimeout(timer); reject(error); });
   });
 }
 
-async function waitReady(output, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (output.stdout.includes('u-wash is ready')) return;
-    if (output.stderr.includes('u-wash could not start')) throw new Error(`server failed early: ${output.stderr}`);
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  throw new Error(`server did not become ready: ${output.stdout} ${output.stderr}`);
+function waitReady(child, output, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    let timer, onClose, poll;
+    const finish = (ok, error) => {
+      clearTimeout(timer);
+      child.removeListener('close', onClose);
+      clearInterval(poll);
+      ok ? resolve() : reject(error);
+    };
+    timer = setTimeout(() => finish(false, new Error(`server did not become ready: ${output.stdout} ${output.stderr}`)), timeoutMs);
+    onClose = (code, signal) => finish(false, new Error(`server exited before ready (code ${code}, signal ${signal}): ${output.stderr || output.stdout}`));
+    poll = setInterval(() => {
+      if (output.stdout.includes('u-wash is ready')) finish(true);
+      else if (output.stderr.includes(STARTUP_ERROR_PREFIX)) finish(false, new Error(`server failed early: ${output.stderr}`));
+    }, 100);
+    child.once('close', onClose);
+  });
 }
 
 function occupy(port) {
@@ -46,21 +57,6 @@ function occupy(port) {
     const blocker = net.createServer();
     blocker.once('error', reject);
     blocker.listen(port, '127.0.0.1', () => resolve(blocker));
-  });
-}
-
-function request(port, method, route, body, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: 'localhost', port, path: route, method, agent,
-      headers: { Origin: `https://localhost:${port}`, ...headers },
-    }, res => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
-    });
-    req.on('error', reject);
-    req.end(body);
   });
 }
 
@@ -103,6 +99,7 @@ const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uwash-startup-'));
   const { code } = await untilExit(child);
   assert.equal(code, 1);
   assert.match(output.stderr, new RegExp(`sharing port ${port} is already in use`));
+  assert.ok(output.stderr.includes(STARTUP_ERROR_PREFIX), 'must carry the machine-readable startup-error marker');
   assert.ok(!output.stdout.includes('u-wash is ready'), 'readiness must not be claimed when a listener failed');
   blocker.close();
   console.log('ok: occupied sharing port exits 1 with an actionable message');
@@ -117,9 +114,25 @@ const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uwash-startup-'));
   const { code } = await untilExit(child);
   assert.equal(code, 1);
   assert.match(output.stderr, new RegExp(`desktop port ${desktopPort} is already in use`));
+  assert.ok(output.stderr.includes(STARTUP_ERROR_PREFIX), 'must carry the machine-readable startup-error marker');
   assert.ok(!output.stdout.includes('u-wash is ready'), 'readiness must wait for every listener');
   blocker.close();
   console.log('ok: occupied desktop port exits 1 and withholds the ready line');
+}
+
+// 2b. Death before ready without the known error line (unwritable data dir):
+//     still a fast non-zero exit with no readiness claim. The desktop shell
+//     falls back to the last stderr line or the exit code for this path.
+{
+  const notADir = path.join(dataDir, 'not-a-dir');
+  await fs.writeFile(notADir, 'not a directory');
+  const { child, output } = spawnServer({ PORT: '8886', UWASH_DESKTOP_PORT: '8887', UWASH_DATA_DIR: path.join(notADir, 'nested') });
+  const { code } = await untilExit(child);
+  assert.equal(code, 1);
+  assert.ok(!output.stdout.includes('u-wash is ready'), 'readiness must never be claimed on early death');
+  assert.ok(!output.stderr.includes(STARTUP_ERROR_PREFIX), 'unknown-death path must not claim the known startup-error contract');
+  assert.ok(output.stderr.trim().length > 0, 'the crash should still explain itself on stderr');
+  console.log('ok: early death without a known error still exits 1 with no readiness claim');
 }
 
 // 3. Both listeners free: the ready line prints (this is the sidecar contract),
@@ -128,23 +141,19 @@ const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uwash-startup-'));
   const port = 8882;
   const desktopPort = 8883;
   const { child, output } = spawnServer({ PORT: String(port), UWASH_DESKTOP_PORT: String(desktopPort), UWASH_DATA_DIR: dataDir });
-  await waitReady(output);
+  await waitReady(child, output);
   assert.ok(output.stdout.includes('u-wash is ready'));
 
   // The desktop channel is plain http on its own loopback port; the pairing
   // code only exists there, so this instance pairs through it.
-  const desktopInfo = JSON.parse(await new Promise((resolve, reject) => {
-    const req = http.request({ hostname: '127.0.0.1', port: desktopPort, path: '/api/desktop', method: 'GET', headers: { Origin: `http://127.0.0.1:${desktopPort}` } }, res => {
-      const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => resolve(Buffer.concat(chunks).toString()));
-    });
-    req.on('error', reject); req.end();
-  }));
-  const pair = await request(port, 'POST', '/api/pair', Buffer.from(JSON.stringify({ pin: desktopInfo.pin })), { 'Content-Type': 'application/json' });
+  const desktopRequest = createClient({ host: '127.0.0.1', port: desktopPort, tls: false, origin: `http://127.0.0.1:${desktopPort}` });
+  const desktopInfo = JSON.parse((await desktopRequest('GET', '/api/desktop')).body.toString());
+  const request = createClient({ host: 'localhost', port, tls: true, origin: `https://localhost:${port}` });
+  const pair = await request('POST', '/api/pair', Buffer.from(JSON.stringify({ pin: desktopInfo.pin })));
   assert.equal(pair.status, 200);
-  const cookie = pair.headers['set-cookie'][0].split(';')[0];
 
   // a. Declared length over the 1 GiB limit: intended 413, message names the limit.
-  const oversize = await uploadCase(port, cookie, { name: 'oversize.bin', declared: 2 * 1024 * 1024 * 1024, body: Buffer.alloc(64) });
+  const oversize = await uploadCase(port, request.cookie(), { name: 'oversize.bin', declared: 2 * 1024 * 1024 * 1024, body: Buffer.alloc(64) });
   assert.equal(oversize.status, 413);
   assert.match(oversize.body, /File limit is 1 GB/);
   console.log('ok: declared oversize upload gets the intended 413');
@@ -152,17 +161,17 @@ const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uwash-startup-'));
   // b. Chunked body (no Content-Length): currently conflated with oversize and
   //    answered 413 with the same message. Pinned as-is; 411 Length Required
   //    would be the more accurate status if this is ever revisited.
-  const chunked = await uploadCase(port, cookie, { name: 'chunked.bin', chunked: true, body: Buffer.from('chunked body') });
+  const chunked = await uploadCase(port, request.cookie(), { name: 'chunked.bin', chunked: true, body: Buffer.from('chunked body') });
   assert.equal(chunked.status, 413);
   assert.match(chunked.body, /File limit is 1 GB/);
   console.log('ok: chunked upload is answered 413 (characterized, not endorsed)');
 
   // c. Client aborts mid-body after a valid declared length: the server must
   //    survive, leave no shared file, and clean its upload temp.
-  const aborted = await uploadCase(port, cookie, { name: 'aborted.bin', declared: 1000, body: Buffer.alloc(600), abortAfter: 200 });
+  const aborted = await uploadCase(port, request.cookie(), { name: 'aborted.bin', declared: 1000, body: Buffer.alloc(600), abortAfter: 200 });
   assert.equal(aborted.aborted, true);
   await new Promise(resolve => setTimeout(resolve, 300));
-  assert.equal((await request(port, 'GET', '/api/session')).status, 200);
+  assert.equal((await request('GET', '/api/session')).status, 200);
   assert.ok(!(await fs.stat(path.join(dataDir, 'shared', 'aborted.bin')).catch(() => null)), 'no shared file after aborted upload');
   assert.deepEqual(await fs.readdir(path.join(dataDir, '.local', 'uploads')), [], 'upload temp must be cleaned');
   console.log('ok: aborted upload leaves the server alive with no partial file');
@@ -198,8 +207,9 @@ const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uwash-startup-'));
     const output = { stdout: '', stderr: '' };
     child.stdout.on('data', chunk => output.stdout += chunk);
     child.stderr.on('data', chunk => output.stderr += chunk);
-    await waitReady(output);
-    const index = await request(port, 'GET', '/');
+    await waitReady(child, output);
+    const request = createClient({ host: '127.0.0.1', port, tls: true, origin: `https://localhost:${port}` });
+    const index = await request('GET', '/');
     assert.equal(index.status, 200);
     assert.match(index.body.toString(), /<!doctype html>/i);
     child.kill();

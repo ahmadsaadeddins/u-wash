@@ -276,6 +276,9 @@ if (process.env.UWASH_PARENT_PID) {
   parentWatch.unref();
 }
 
+// Machine-readable marker on startup-failure output; the desktop shell and the
+// startup tests match this prefix rather than the human wording after it.
+const startupErrorPrefix = 'UWASH_STARTUP_ERROR:';
 function announceReady() {
   console.log(`\nu-wash is ready\nComputer: https://localhost:${port}\nPhone:    ${addresses.map(ip => `https://${ip}:${port}`).join(' or ') || 'connect to this computer on your local network'}\nPairing code: ${pin}\nShared files: ${sharedDir}\n`);
   console.log('Both devices must be on the same local network. On your phone, accept the local certificate warning once.');
@@ -285,15 +288,17 @@ function listenFailure(name, listenPort) {
     const reason = error.code === 'EADDRINUSE'
       ? `is already in use. Close the other u-wash instance (for example a "npm start" server or another desktop app), or free the port, then start again`
       : `could not be opened (${error.code || error.message})`;
-    console.error(`u-wash could not start: the ${name} port ${listenPort} ${reason}.`);
+    console.error(`${startupErrorPrefix} the ${name} port ${listenPort} ${reason}.`);
     process.exit(1);
   };
 }
-const listeners = desktopServer ? [[server, 'sharing', port], [desktopServer, 'desktop', desktopPort]] : [[server, 'sharing', port]];
+const listeners = desktopServer
+  ? [[server, 'sharing', port, listenHost], [desktopServer, 'desktop', desktopPort, '127.0.0.1']]
+  : [[server, 'sharing', port, listenHost]];
 let started = 0;
-for (const [listener, name, listenPort] of listeners) {
+for (const [listener, name, listenPort, host] of listeners) {
   listener.on('error', listenFailure(name, listenPort));
-  listener.listen(listenPort, listener === server ? listenHost : '127.0.0.1', () => {
+  listener.listen(listenPort, host, () => {
     // The "u-wash is ready" line is the sidecar readiness contract: print it only once every listener is bound.
     if (++started === listeners.length) announceReady();
   });

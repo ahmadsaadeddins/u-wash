@@ -1,55 +1,21 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import https from 'node:https';
-import http from 'node:http';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { WebSocket } from 'ws';
+import { createClient, openSocket } from './helpers.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const port = 8877;
 const desktopPort = 8878;
 const child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(port), UWASH_DESKTOP_PORT: String(desktopPort), UWASH_HOST: '127.0.0.1', UWASH_PIN: '123456' }, stdio: 'pipe' });
-const agent = new https.Agent({ rejectUnauthorized: false });
-let cookie;
-async function request(method, route, body, type, extraHeaders = {}) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({ hostname: 'localhost', port, path: route, method, agent, headers: { Origin: `https://localhost:${port}`, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': type || 'application/json', 'Content-Length': body.length } : {}), ...extraHeaders } }, res => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
-    });
-    req.on('error', reject); req.end(body);
-  });
-}
-async function desktopRequest(method, route, body, extraHeaders = {}) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({ hostname: '127.0.0.1', port: desktopPort, path: route, method, headers: { Origin: `http://127.0.0.1:${desktopPort}`, ...(body ? { 'Content-Type': 'application/json', 'Content-Length': body.length } : {}), ...extraHeaders } }, res => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
-    });
-    req.on('error', reject); req.end(body);
-  });
-}
+const request = createClient({ host: 'localhost', port, tls: true, origin: `https://localhost:${port}` });
+const desktopRequest = createClient({ host: '127.0.0.1', port: desktopPort, tls: false, origin: `http://127.0.0.1:${desktopPort}` });
 async function ready() {
   for (let i = 0; i < 50; i++) {
     try { await request('GET', '/api/session'); return; } catch { await new Promise(r => setTimeout(r, 100)); }
   }
   throw new Error('Server did not start');
-}
-async function socket() {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`wss://localhost:${port}/ws`, { rejectUnauthorized: false, headers: { Cookie: cookie, Origin: `https://localhost:${port}` } });
-    ws.once('open', () => resolve(ws)); ws.once('error', reject);
-  });
-}
-async function desktopSocket() {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${desktopPort}/ws`, { headers: { Origin: `http://127.0.0.1:${desktopPort}` } });
-    ws.once('open', () => resolve(ws)); ws.once('error', reject);
-  });
 }
 try {
   await ready();
@@ -58,8 +24,8 @@ try {
   assert.equal(JSON.parse(desktopSession.body).paired, true);
   const desktopInfo = await desktopRequest('GET', '/api/desktop');
   assert.equal(JSON.parse(desktopInfo.body).pin, '123456');
-  assert.equal((await desktopRequest('GET', '/api/desktop', undefined, { Host: `untrusted.test:${desktopPort}` })).status, 421);
-  assert.equal((await desktopRequest('POST', '/api/open-downloads', undefined, { Origin: 'http://untrusted.test:8878' })).status, 403);
+  assert.equal((await desktopRequest('GET', '/api/desktop', undefined, undefined, { Host: `untrusted.test:${desktopPort}` })).status, 421);
+  assert.equal((await desktopRequest('POST', '/api/open-downloads', undefined, undefined, { Origin: 'http://untrusted.test:8878' })).status, 403);
   assert.equal((await request('GET', '/api/desktop')).status, 403);
   assert.equal((await request('GET', '/', undefined, undefined, { Host: `untrusted.test:${port}` })).status, 421);
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'), undefined, { Origin: 'https://untrusted.test:8877' })).status, 403);
@@ -67,7 +33,7 @@ try {
   assert.equal((await request('GET', '/api/files')).status, 401);
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"000000"}'))).status, 401);
   const pair = await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'));
-  assert.equal(pair.status, 200); cookie = pair.headers['set-cookie'][0].split(';')[0];
+  assert.equal(pair.status, 200);
   assert.equal((await request('POST', '/api/open-downloads')).status, 403);
   const text = Buffer.from('hello from phone');
   assert.equal((await request('PUT', '/api/upload?path=smoke-test%2Fhello.txt', text, 'application/octet-stream')).status, 200);
@@ -89,7 +55,8 @@ try {
   } finally { await fs.rm(linkedFile, { force: true }); }
   assert.equal((await request('POST', '/api/clipboard', Buffer.from('{"text":"shared text"}'))).status, 200);
   assert.equal(JSON.parse((await request('GET', '/api/clipboard')).body).text, 'shared text');
-  const sender = await socket(), receiver = await desktopSocket();
+  const sender = await openSocket({ host: 'localhost', port, tls: true, origin: `https://localhost:${port}`, cookie: request.cookie() });
+  const receiver = await openSocket({ host: '127.0.0.1', port: desktopPort, tls: false, origin: `http://127.0.0.1:${desktopPort}` });
   const gotAudio = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Audio was not forwarded')), 3000);
     receiver.on('message', (data, binary) => { if (binary) { clearTimeout(timer); resolve(data); } });

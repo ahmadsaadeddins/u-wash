@@ -20,7 +20,7 @@ The desktop window displays the phone URLs and current pairing code. Open one of
 
 In the desktop window, **Download** saves a copy to your Windows Downloads folder. If WebView2 asks whether to allow the download, choose **Allow**. Click **Open Downloads folder** to find the saved file. The original shared file remains in u-wash's app data folder.
 
-The desktop app uses ports 8765 (phone HTTPS) and 8766 (desktop loopback). Close a separately started `npm start` server before opening the desktop app. Only one desktop instance can run at a time. If a port is already taken, or the server stops during startup, the desktop window does not open: an error dialog names the port or reason, and the server prints the same message in a terminal.
+The desktop app uses ports 8765 (phone HTTPS) and 8766 (desktop loopback). Close a separately started `npm start` server before opening the desktop app. Only one desktop instance can run at a time. If a port is already taken, or the server stops during startup, the desktop window does not open: an error dialog names the port or reason. A server started with `npm start` prints the same error in its terminal.
 
 ## Start without Tauri
 
@@ -52,9 +52,9 @@ For text, paste or type into the box and click **Send text**. On the other devic
 ### Limits
 
 - Pairing: 5 wrong codes pause pairing from that device for 60 seconds. Up to 32 devices can be paired at once; restarting the server clears all sessions, and sessions otherwise expire after 24 hours.
-- Files: 1 GB per file, up to 2 uploads at a time, and listings show the newest 5,000 files. Uploads without a declared length are refused with the same size-limit message.
+- Files: 1 GB per file, up to 2 uploads at a time, and listings show up to 5,000 files. Uploads without a declared length are refused with the same size-limit message.
 - Text: 50,000 characters per clipboard message.
-- Microphone: up to 8 devices can listen at once; a sender exceeding roughly 2 MB/s is disconnected.
+- Microphone: up to 8 connected devices, counting the desktop window, can listen at once; a sender exceeding roughly 2 MB/s is disconnected.
 
 ## Notes
 

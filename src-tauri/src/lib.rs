@@ -12,11 +12,42 @@ use tauri_plugin_shell::{process::CommandChild, ShellExt};
 /// readiness contract between server.js and this shell.
 const READY_LINE: &str = "u-wash is ready";
 
+/// Machine-readable marker the sharing server puts on startup-failure output;
+/// the wording after it is human-readable and may change.
+const STARTUP_ERROR_PREFIX: &str = "UWASH_STARTUP_ERROR:";
+
 #[derive(Default)]
 struct SidecarStatus {
     ready: bool,
     exited: Option<Option<i32>>,
     stderr: Vec<String>,
+}
+
+fn kill_sidecar<R: tauri::Runtime>(manager: &impl tauri::Manager<R>) {
+    if let Some(child) = manager.state::<Mutex<Option<CommandChild>>>().lock().unwrap().take() {
+        let _ = child.kill();
+    }
+}
+
+/// Picks the human reason shown in the startup-failure dialog: a
+/// UWASH_STARTUP_ERROR line from the sharing server wins, then the last
+/// stderr output, then the exit code itself.
+fn failure_reason(stderr: &[String], code: Option<i32>) -> String {
+    stderr
+        .iter()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(STARTUP_ERROR_PREFIX).map(|reason| reason.trim().to_string()))
+        .or_else(|| {
+            stderr
+                .iter()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+        })
+        .unwrap_or_else(|| match code {
+            Some(code) => format!("the sharing server exited with code {code}"),
+            None => "the sharing server exited before it was ready".to_string(),
+        })
 }
 
 fn start(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -98,23 +129,7 @@ fn start(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             if let Some(code) = state.exited {
-                let reason = state
-                    .stderr
-                    .iter()
-                    .rev()
-                    .find_map(|line| line.contains("u-wash could not start").then(|| line.trim().to_string()))
-                    .or_else(|| {
-                        state
-                            .stderr
-                            .iter()
-                            .rev()
-                            .find(|line| !line.trim().is_empty())
-                            .map(|line| line.trim().to_string())
-                    })
-                    .unwrap_or_else(|| match code {
-                        Some(code) => format!("the sharing server exited with code {code}"),
-                        None => "the sharing server exited before it was ready".to_string(),
-                    });
+                let reason = failure_reason(&state.stderr, code);
                 failure = Some(format!("u-wash Desktop could not start.\n\n{reason}"));
                 break;
             }
@@ -130,9 +145,7 @@ fn start(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(message) = failure {
-        if let Some(child) = app.state::<Mutex<Option<CommandChild>>>().lock().unwrap().take() {
-            let _ = child.kill();
-        }
+        kill_sidecar(app);
         return Err(message.into());
     }
 
@@ -164,14 +177,38 @@ pub fn run() {
     match built {
         Ok(app) => app.run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                if let Some(child) = app.state::<Mutex<Option<CommandChild>>>().lock().unwrap().take() {
-                    let _ = child.kill();
-                }
+                kill_sidecar(app);
             }
         }),
         Err(error) => {
             eprintln!("u-wash Desktop failed to start: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_error_line_wins_over_other_output() {
+        let stderr = vec![
+            "noise before".to_string(),
+            format!("{STARTUP_ERROR_PREFIX} the sharing port 8765 is already in use."),
+        ];
+        assert_eq!(failure_reason(&stderr, Some(1)), "the sharing port 8765 is already in use.");
+    }
+
+    #[test]
+    fn last_stderr_line_is_the_fallback() {
+        let stderr = vec![String::new(), "Error: ENOTDIR".to_string()];
+        assert_eq!(failure_reason(&stderr, Some(1)), "Error: ENOTDIR");
+    }
+
+    #[test]
+    fn exit_code_is_the_last_resort() {
+        assert_eq!(failure_reason(&[], Some(3)), "the sharing server exited with code 3");
+        assert_eq!(failure_reason(&[], None), "the sharing server exited before it was ready");
     }
 }
