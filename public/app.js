@@ -5,6 +5,7 @@ let playingContext, outputStream, outputElement, playAt = 0, streamRate = 48000;
 let latestClipboard = '';
 let meterTimer;
 let reconnectEnabled = true;
+let phoneUrl = '';
 
 function status(message, bad = false) { $('connection').textContent = message; $('connection').classList.toggle('off', bad); }
 async function api(url, options = {}) {
@@ -14,9 +15,16 @@ async function api(url, options = {}) {
 }
 async function init() {
   try {
-    const { paired } = await api('/api/session');
+    const { paired, desktop } = await api('/api/session');
     $('pairView').hidden = paired; $('appView').hidden = !paired;
-    $('logoutButton').hidden = !paired;
+    $('logoutButton').hidden = !paired || desktop;
+    $('desktopPanel').hidden = !desktop;
+    if (desktop) {
+      const info = await api('/api/desktop');
+      phoneUrl = info.phoneUrls[0] || '';
+      $('phoneUrl').textContent = phoneUrl || 'No local network address found';
+      $('desktopPin').textContent = info.pin;
+    }
     if (paired) { status('Connected'); connectSocket(); await Promise.all([refreshFiles(), refreshClipboard()]); }
     else status('Pairing needed', true);
   } catch { status('Server unavailable', true); }
@@ -27,7 +35,7 @@ $('pairForm').addEventListener('submit', async event => {
   catch (error) { $('pairMessage').textContent = error.message; }
 });
 function connectSocket() {
-  socket = new WebSocket(`wss://${location.host}/ws`);
+  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   socket.binaryType = 'arraybuffer';
   socket.onopen = () => status('Connected');
   socket.onclose = async () => {
@@ -54,6 +62,11 @@ $('logoutButton').onclick = async () => {
   reconnectEnabled = false;
   try { await api('/api/logout', { method: 'POST' }); socket?.close(); location.reload(); }
   catch (error) { reconnectEnabled = true; status(error.message, true); }
+};
+$('copyPhoneUrl').onclick = async () => {
+  if (!phoneUrl) return;
+  try { await navigator.clipboard.writeText(phoneUrl); $('copyPhoneUrl').textContent = 'Copied'; }
+  catch { $('copyPhoneUrl').textContent = 'Select the link to copy'; }
 };
 function displayClipboard(data) {
   latestClipboard = data.text || '';

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import https from 'node:https';
+import http from 'node:http';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -8,12 +9,23 @@ import { WebSocket } from 'ws';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const port = 8877;
-const child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(port), UWASH_HOST: '127.0.0.1', UWASH_PIN: '123456' }, stdio: 'pipe' });
+const desktopPort = 8878;
+const child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(port), UWASH_DESKTOP_PORT: String(desktopPort), UWASH_HOST: '127.0.0.1', UWASH_PIN: '123456' }, stdio: 'pipe' });
 const agent = new https.Agent({ rejectUnauthorized: false });
 let cookie;
 async function request(method, route, body, type, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = https.request({ hostname: 'localhost', port, path: route, method, agent, headers: { Origin: `https://localhost:${port}`, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': type || 'application/json', 'Content-Length': body.length } : {}), ...extraHeaders } }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject); req.end(body);
+  });
+}
+async function desktopRequest(method, route, body, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port: desktopPort, path: route, method, headers: { Origin: `http://127.0.0.1:${desktopPort}`, ...(body ? { 'Content-Type': 'application/json', 'Content-Length': body.length } : {}), ...extraHeaders } }, res => {
       const chunks = [];
       res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
@@ -33,8 +45,21 @@ async function socket() {
     ws.once('open', () => resolve(ws)); ws.once('error', reject);
   });
 }
+async function desktopSocket() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${desktopPort}/ws`, { headers: { Origin: `http://127.0.0.1:${desktopPort}` } });
+    ws.once('open', () => resolve(ws)); ws.once('error', reject);
+  });
+}
 try {
   await ready();
+  const desktopSession = await desktopRequest('GET', '/api/session');
+  assert.equal(JSON.parse(desktopSession.body).desktop, true);
+  assert.equal(JSON.parse(desktopSession.body).paired, true);
+  const desktopInfo = await desktopRequest('GET', '/api/desktop');
+  assert.equal(JSON.parse(desktopInfo.body).pin, '123456');
+  assert.equal((await desktopRequest('GET', '/api/desktop', undefined, { Host: `untrusted.test:${desktopPort}` })).status, 421);
+  assert.equal((await request('GET', '/api/desktop')).status, 403);
   assert.equal((await request('GET', '/', undefined, undefined, { Host: `untrusted.test:${port}` })).status, 421);
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'), undefined, { Origin: 'https://untrusted.test:8877' })).status, 403);
   assert.match((await request('GET', '/')).headers['content-security-policy'], /frame-ancestors 'none'/);
@@ -58,7 +83,7 @@ try {
   } finally { await fs.rm(linkedFile, { force: true }); }
   assert.equal((await request('POST', '/api/clipboard', Buffer.from('{"text":"shared text"}'))).status, 200);
   assert.equal(JSON.parse((await request('GET', '/api/clipboard')).body).text, 'shared text');
-  const sender = await socket(), receiver = await socket();
+  const sender = await socket(), receiver = await desktopSocket();
   const gotAudio = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Audio was not forwarded')), 3000);
     receiver.on('message', (data, binary) => { if (binary) { clearTimeout(timer); resolve(data); } });

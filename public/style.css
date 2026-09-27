@@ -3,3 +3,11 @@
 .headerActions{display:flex;align-items:center;gap:12px}
 #logoutButton{padding:8px 12px;font-size:12px}
 #logoutButton[hidden]{display:none}
+.desktopPanel{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:20px}
+.desktopPanel[hidden]{display:none}
+.desktopPanel h2{margin:9px 0 7px}
+.desktopLink{color:#a9e9c7;font-weight:700;margin-top:15px;overflow-wrap:anywhere}
+.desktopCode{display:flex;flex-direction:column;align-items:center;gap:9px;min-width:170px}
+.desktopCode span{font-size:10px;color:#91a6aa;letter-spacing:.15em;font-weight:800}
+.desktopCode strong{font-size:31px;letter-spacing:.18em;color:#a9e9c7}
+@media(max-width:760px){.desktopPanel{display:block}.desktopCode{align-items:flex-start;margin-top:22px}}

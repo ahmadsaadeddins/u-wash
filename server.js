@@ -1,4 +1,5 @@
 import https from 'node:https';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -10,12 +11,15 @@ import selfsigned from 'selfsigned';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const localDir = path.join(here, '.local');
+const dataDir = process.env.UWASH_DATA_DIR || here;
+const localDir = path.join(dataDir, '.local');
 const uploadTempDir = path.join(localDir, 'uploads');
-const sharedDir = path.join(here, 'shared');
-const publicDir = path.join(here, 'public');
+const sharedDir = path.join(dataDir, 'shared');
+const publicDir = process.env.UWASH_ASSETS_DIR || path.join(here, 'public');
 const port = Number(process.env.PORT || 8765);
 const listenHost = process.env.UWASH_HOST || '0.0.0.0';
+const desktopPort = Number(process.env.UWASH_DESKTOP_PORT || 0);
+const desktopHost = `127.0.0.1:${desktopPort}`;
 const pin = String(process.env.UWASH_PIN || crypto.randomInt(100000, 1000000));
 const sessionLifetimeMs = 24 * 60 * 60 * 1000;
 const sessions = new Map();
@@ -46,7 +50,7 @@ if (!fs.existsSync(keyFile) || !fs.existsSync(certFile)) {
 }
 
 function send(res, code, data, type = 'application/json; charset=utf-8') {
-  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' wss:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
+  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
   res.end(type.startsWith('application/json') ? JSON.stringify(data) : data);
 }
 function sessionToken(req) {
@@ -57,11 +61,16 @@ function sessionToken(req) {
   if (expiry <= Date.now()) { sessions.delete(match[1]); return null; }
   return match[1];
 }
-function authenticated(req) { return !!sessionToken(req); }
+function isDesktop(req) { return desktopPort > 0 && req.headers.host === desktopHost && (req.socket.remoteAddress === '127.0.0.1' || req.socket.remoteAddress === '::ffff:127.0.0.1'); }
+function authenticated(req) { return isDesktop(req) || !!sessionToken(req); }
 function sameOrigin(req) {
-  try { const origin = new URL(req.headers.origin); return origin.protocol === 'https:' && origin.host === req.headers.host && allowedHosts.has(origin.host); } catch { return false; }
+  try {
+    const origin = new URL(req.headers.origin);
+    if (isDesktop(req)) return origin.protocol === 'http:' && origin.host === desktopHost;
+    return origin.protocol === 'https:' && origin.host === req.headers.host && allowedHosts.has(origin.host);
+  } catch { return false; }
 }
-function allowedHost(req) { return allowedHosts.has(req.headers.host); }
+function allowedHost(req) { return isDesktop(req) || allowedHosts.has(req.headers.host); }
 function safePath(raw) {
   if (!raw || raw.length > 1000 || raw.includes('\0')) throw new Error('Invalid path');
   const parts = raw.replaceAll('\\', '/').split('/');
@@ -101,11 +110,15 @@ function broadcast(message, except) {
   for (const client of clients) if (client !== except && client.readyState === WebSocket.OPEN && client.bufferedAmount < maxBufferedBytes) client.send(message);
 }
 
-const server = https.createServer({ key: await fsp.readFile(keyFile), cert: await fsp.readFile(certFile) }, async (req, res) => {
+async function handleRequest(req, res) {
   try {
     if (!allowedHost(req)) return send(res, 421, { error: 'Unknown host' });
     const url = new URL(req.url, `https://${req.headers.host}`);
-    if (url.pathname === '/api/session' && req.method === 'GET') return send(res, 200, { paired: authenticated(req) });
+    if (url.pathname === '/api/session' && req.method === 'GET') return send(res, 200, { paired: authenticated(req), desktop: isDesktop(req) });
+    if (url.pathname === '/api/desktop' && req.method === 'GET') {
+      if (!isDesktop(req)) return send(res, 403, { error: 'Desktop only' });
+      return send(res, 200, { pin, phoneUrls: addresses.map(ip => `https://${ip}:${port}`), sharedDir });
+    }
     if (url.pathname === '/api/pair' && req.method === 'POST') {
       if (!sameOrigin(req)) return send(res, 403, { error: 'Invalid origin' });
       const ip = req.socket.remoteAddress;
@@ -187,16 +200,22 @@ const server = https.createServer({ key: await fsp.readFile(keyFile), cert: awai
     if (!res.headersSent) send(res, error.code === 'ENOENT' ? 404 : 400, { error: error.message || 'Request failed' });
     else res.destroy();
   }
-});
-server.headersTimeout = 15_000;
-server.requestTimeout = 10 * 60_000;
-server.maxHeadersCount = 50;
+}
+const server = https.createServer({ key: await fsp.readFile(keyFile), cert: await fsp.readFile(certFile) }, handleRequest);
+const desktopServer = desktopPort > 0 ? http.createServer(handleRequest) : null;
+for (const listener of [server, desktopServer].filter(Boolean)) {
+  listener.headersTimeout = 15_000;
+  listener.requestTimeout = 10 * 60_000;
+  listener.maxHeadersCount = 50;
+}
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
-server.on('upgrade', (req, socket, head) => {
+function upgrade(req, socket, head) {
   if (!allowedHost(req) || !authenticated(req) || !sameOrigin(req) || clients.size >= maxClients || new URL(req.url, `https://${req.headers.host}`).pathname !== '/ws') return socket.destroy();
-  wss.handleUpgrade(req, socket, head, ws => { ws.sessionToken = sessionToken(req); wss.emit('connection', ws); });
-});
+  wss.handleUpgrade(req, socket, head, ws => { ws.desktop = isDesktop(req); ws.sessionToken = sessionToken(req); wss.emit('connection', ws); });
+}
+server.on('upgrade', upgrade);
+desktopServer?.on('upgrade', upgrade);
 wss.on('connection', ws => {
   clients.add(ws);
   ws.isAlive = true;
@@ -230,13 +249,21 @@ wss.on('connection', ws => {
 });
 const heartbeat = setInterval(() => {
   for (const ws of clients) {
-    if (!sessions.has(ws.sessionToken) || sessions.get(ws.sessionToken) <= Date.now() || !ws.isAlive) { ws.terminate(); continue; }
+    if ((!ws.desktop && (!sessions.has(ws.sessionToken) || sessions.get(ws.sessionToken) <= Date.now())) || !ws.isAlive) { ws.terminate(); continue; }
     ws.isAlive = false; ws.ping();
   }
 }, 30_000);
 heartbeat.unref();
+if (process.env.UWASH_PARENT_PID) {
+  const parentPid = Number(process.env.UWASH_PARENT_PID);
+  const parentWatch = setInterval(() => {
+    try { process.kill(parentPid, 0); } catch { process.exit(0); }
+  }, 5_000);
+  parentWatch.unref();
+}
 
 server.listen(port, listenHost, () => {
   console.log(`\nu-wash is ready\nComputer: https://localhost:${port}\nPhone:    ${addresses.map(ip => `https://${ip}:${port}`).join(' or ') || 'connect to this computer on your local network'}\nPairing code: ${pin}\nShared files: ${sharedDir}\n`);
   console.log('Both devices must be on the same local network. On your phone, accept the local certificate warning once.');
 });
+desktopServer?.listen(desktopPort, '127.0.0.1');
