@@ -18,6 +18,8 @@ To make a Windows installer, run `npm run desktop:build`. The NSIS installer is 
 
 The desktop window displays the phone URL and current pairing code. Open that URL on a phone on the same Wi-Fi and enter the code. Accept the local certificate warning on the phone. Allow **u-wash** through Windows Firewall on Private networks if prompted. Keep the desktop app open while using the phone. To send the phone microphone into Codex, follow the VB-CABLE steps below.
 
+In the desktop window, **Download** saves a copy to your Windows Downloads folder. If WebView2 asks whether to allow the download, choose **Allow**. Click **Open Downloads folder** to find the saved file. The original shared file remains in u-wash's app data folder.
+
 The desktop app uses ports 8765 (phone HTTPS) and 8766 (desktop loopback). Close a separately started `npm start` server before opening the desktop app. Only one desktop instance can run at a time.
 
 ## Start without Tauri

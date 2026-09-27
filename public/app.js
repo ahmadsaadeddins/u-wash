@@ -6,6 +6,7 @@ let latestClipboard = '';
 let meterTimer;
 let reconnectEnabled = true;
 let phoneUrl = '';
+let desktopMode = false;
 
 function status(message, bad = false) { $('connection').textContent = message; $('connection').classList.toggle('off', bad); }
 async function api(url, options = {}) {
@@ -16,9 +17,12 @@ async function api(url, options = {}) {
 async function init() {
   try {
     const { paired, desktop } = await api('/api/session');
+    desktopMode = desktop;
     $('pairView').hidden = paired; $('appView').hidden = !paired;
     $('logoutButton').hidden = !paired || desktop;
     $('desktopPanel').hidden = !desktop;
+    $('openDownloads').hidden = !desktop;
+    $('downloadHint').hidden = !desktop;
     if (desktop) {
       const info = await api('/api/desktop');
       phoneUrl = info.phoneUrls[0] || '';
@@ -67,6 +71,10 @@ $('copyPhoneUrl').onclick = async () => {
   if (!phoneUrl) return;
   try { await navigator.clipboard.writeText(phoneUrl); $('copyPhoneUrl').textContent = 'Copied'; }
   catch { $('copyPhoneUrl').textContent = 'Select the link to copy'; }
+};
+$('openDownloads').onclick = async () => {
+  try { await api('/api/open-downloads', { method: 'POST' }); }
+  catch (error) { $('downloadHint').textContent = `Could not open Downloads: ${error.message}`; }
 };
 function displayClipboard(data) {
   latestClipboard = data.text || '';
@@ -177,6 +185,7 @@ async function refreshFiles() {
       const meta = document.createElement('div'); meta.className = 'fileMeta'; meta.textContent = `${niceSize(file.size)} · ${new Date(file.updatedAt).toLocaleString()}`;
       info.append(name, meta);
       const link = document.createElement('a'); link.href = `/api/download?path=${encodeURIComponent(file.path)}`; link.textContent = 'Download';
+      link.addEventListener('click', () => { if (desktopMode) $('downloadHint').textContent = 'Download started. Use Open Downloads folder to find it.'; });
       row.append(info, link); list.append(row);
     }
   } catch (error) { $('uploadStatus').textContent = error.message; }

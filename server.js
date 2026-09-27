@@ -3,6 +3,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import fs, { createReadStream, createWriteStream } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -147,6 +148,16 @@ async function handleRequest(req, res) {
         for (const client of clients) if (client.sessionToken === token) client.terminate();
         res.writeHead(200, { 'Set-Cookie': 'uwash=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0', 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         return res.end(JSON.stringify({ ok: true }));
+      }
+      if (url.pathname === '/api/open-downloads' && req.method === 'POST') {
+        if (!isDesktop(req) || process.platform !== 'win32') return send(res, 403, { error: 'Desktop only' });
+        const folder = path.join(os.homedir(), 'Downloads');
+        await new Promise((resolve, reject) => {
+          const explorer = spawn('explorer.exe', [folder], { detached: true, stdio: 'ignore' });
+          explorer.once('error', reject);
+          explorer.once('spawn', () => { explorer.unref(); resolve(); });
+        });
+        return send(res, 200, { ok: true });
       }
       if (url.pathname === '/api/files' && req.method === 'GET') return send(res, 200, { files: await listFiles() });
       if (url.pathname === '/api/clipboard' && req.method === 'GET') return send(res, 200, clipboard);

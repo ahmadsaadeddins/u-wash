@@ -3,6 +3,7 @@
 .headerActions{display:flex;align-items:center;gap:12px}
 #logoutButton{padding:8px 12px;font-size:12px}
 #logoutButton[hidden]{display:none}
+#openDownloads[hidden]{display:none}
 .desktopPanel{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:20px}
 .desktopPanel[hidden]{display:none}
 .desktopPanel h2{margin:9px 0 7px}

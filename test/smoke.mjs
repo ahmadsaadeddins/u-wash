@@ -59,6 +59,7 @@ try {
   const desktopInfo = await desktopRequest('GET', '/api/desktop');
   assert.equal(JSON.parse(desktopInfo.body).pin, '123456');
   assert.equal((await desktopRequest('GET', '/api/desktop', undefined, { Host: `untrusted.test:${desktopPort}` })).status, 421);
+  assert.equal((await desktopRequest('POST', '/api/open-downloads', undefined, { Origin: 'http://untrusted.test:8878' })).status, 403);
   assert.equal((await request('GET', '/api/desktop')).status, 403);
   assert.equal((await request('GET', '/', undefined, undefined, { Host: `untrusted.test:${port}` })).status, 421);
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'), undefined, { Origin: 'https://untrusted.test:8877' })).status, 403);
@@ -67,6 +68,7 @@ try {
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"000000"}'))).status, 401);
   const pair = await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'));
   assert.equal(pair.status, 200); cookie = pair.headers['set-cookie'][0].split(';')[0];
+  assert.equal((await request('POST', '/api/open-downloads')).status, 403);
   const text = Buffer.from('hello from phone');
   assert.equal((await request('PUT', '/api/upload?path=smoke-test%2Fhello.txt', text, 'application/octet-stream')).status, 200);
   const files = JSON.parse((await request('GET', '/api/files')).body);
