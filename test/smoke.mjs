@@ -31,6 +31,7 @@ try {
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'), undefined, { Origin: 'https://untrusted.test:8877' })).status, 403);
   assert.match((await request('GET', '/')).headers['content-security-policy'], /frame-ancestors 'none'/);
   assert.equal((await request('GET', '/api/files')).status, 401);
+  assert.equal((await request('DELETE', '/api/files?path=x.txt')).status, 401);
   assert.equal((await request('POST', '/api/pair', Buffer.from('{"pin":"000000"}'))).status, 401);
   const pair = await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'));
   assert.equal(pair.status, 200);
@@ -41,6 +42,10 @@ try {
   const files = JSON.parse((await request('GET', '/api/files')).body);
   assert(files.files.some(file => file.path === 'smoke-test/hello.txt'));
   assert.equal((await request('GET', '/api/download?path=smoke-test%2Fhello.txt')).body.toString(), text.toString());
+  assert.equal((await request('DELETE', '/api/files?path=smoke-test%2Fhello.txt')).status, 200);
+  assert.equal((await request('GET', '/api/download?path=smoke-test%2Fhello.txt')).status, 404);
+  assert.equal((await request('DELETE', '/api/files?path=..%2Fserver.js')).status, 400);
+  assert.equal((await request('DELETE', '/api/files?path=smoke-test')).status, 400);
   assert.equal((await request('GET', '/api/download?path=..%2Fserver.js')).status, 400);
   const linkedFile = path.join(root, 'shared', 'smoke-test', 'linked.txt');
   let symlinkChecked = false;

@@ -192,7 +192,13 @@ async function refreshFiles() {
       info.append(name, meta);
       const link = document.createElement('a'); link.href = `/api/download?path=${encodeURIComponent(file.path)}`; link.textContent = 'Download';
       link.addEventListener('click', () => { if (desktopMode) $('downloadHint').textContent = 'Download started. Use Open Downloads folder to find it.'; });
-      row.append(info, link); list.append(row);
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'fileDelete'; del.textContent = '✕'; del.title = 'Delete this file';
+      del.addEventListener('click', async () => {
+        if (!del.classList.contains('armed')) { del.classList.add('armed'); del.textContent = 'Sure?'; return; }
+        try { await api(`/api/files?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' }); await refreshFiles(); }
+        catch (error) { $('fileStatus').textContent = `Could not delete ${file.path}: ${error.message}`; del.classList.remove('armed'); del.textContent = '✕'; }
+      });
+      row.append(info, link, del); list.append(row);
     }
   } catch (error) { $('fileStatus').textContent = `Could not list shared files: ${error.message}`; }
 }

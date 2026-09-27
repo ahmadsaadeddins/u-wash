@@ -12,3 +12,6 @@
 .desktopCode span{font-size:10px;color:#91a6aa;letter-spacing:.15em;font-weight:800}
 .desktopCode strong{font-size:31px;letter-spacing:.18em;color:#a9e9c7}
 @media(max-width:760px){.desktopPanel{display:block}.desktopCode{align-items:flex-start;margin-top:22px}}
+.fileDelete{flex-shrink:0;background:transparent;color:#8fa3a9;border:1px solid #43545a;border-radius:9px;padding:4px 10px;font-size:12px;font-weight:700}
+.fileDelete:hover{transform:none;background:#263740;color:#e5eef0}
+.fileDelete.armed{background:#3b292a;border-color:#68403e;color:#ffc5b5}

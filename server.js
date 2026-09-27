@@ -175,6 +175,15 @@ async function handleRequest(req, res) {
         return send(res, 200, { ok: true });
       }
       if (url.pathname === '/api/files' && req.method === 'GET') return send(res, 200, { files: await listFiles() });
+      if (url.pathname === '/api/files' && req.method === 'DELETE') {
+        const target = safePath(url.searchParams.get('path'));
+        await confinedPath(target, true);
+        const stat = await fsp.stat(target);
+        if (!stat.isFile()) return send(res, 400, { error: 'Only files can be deleted' });
+        await fsp.rm(target);
+        broadcast(JSON.stringify({ type: 'files-changed' }));
+        return send(res, 200, { ok: true });
+      }
       if (url.pathname === '/api/clipboard' && req.method === 'GET') return send(res, 200, clipboard);
       if (url.pathname === '/api/clipboard' && req.method === 'POST') {
         const body = await readJson(req);
