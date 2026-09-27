@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/smoke.mjs",
+    "test": "node test/smoke.mjs && node test/startup.mjs",
     "prepare:tauri": "node scripts/prepare-tauri.mjs",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build"

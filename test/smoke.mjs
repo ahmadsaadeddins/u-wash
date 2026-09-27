@@ -76,12 +76,16 @@ try {
   assert.equal((await request('GET', '/api/download?path=smoke-test%2Fhello.txt')).body.toString(), text.toString());
   assert.equal((await request('GET', '/api/download?path=..%2Fserver.js')).status, 400);
   const linkedFile = path.join(root, 'shared', 'smoke-test', 'linked.txt');
+  let symlinkChecked = false;
   try {
     await fs.symlink(path.join(root, 'README.md'), linkedFile, 'file');
+    symlinkChecked = true;
     assert.equal((await request('GET', '/api/download?path=smoke-test%2Flinked.txt')).status, 400);
     assert.equal((await request('PUT', '/api/upload?path=smoke-test%2Flinked.txt', text, 'application/octet-stream')).status, 400);
   } catch (error) {
     if (!['EPERM', 'EACCES'].includes(error.code)) throw error;
+    if (process.env.UWASH_TEST_REQUIRE_SYMLINKS) throw new Error('Symlink confinement assertions could not run: symlink creation was denied');
+    console.warn('WARNING: symlink confinement assertions were SKIPPED because symlink creation was denied (enable Windows Developer Mode or run as administrator to run them).');
   } finally { await fs.rm(linkedFile, { force: true }); }
   assert.equal((await request('POST', '/api/clipboard', Buffer.from('{"text":"shared text"}'))).status, 200);
   assert.equal(JSON.parse((await request('GET', '/api/clipboard')).body).text, 'shared text');
@@ -96,7 +100,10 @@ try {
   sender.close(); receiver.close();
   assert.equal((await request('POST', '/api/logout')).status, 200);
   assert.equal((await request('GET', '/api/files')).status, 401);
-  console.log('Smoke test passed: host/origin checks, pairing, file confinement, clipboard, audio relay, and logout');
+  // Cookie-less desktop logout must be a harmless no-op for sessions and sockets.
+  assert.equal((await desktopRequest('POST', '/api/logout')).status, 200);
+  assert.equal(JSON.parse((await desktopRequest('GET', '/api/session')).body).desktop, true);
+  console.log(`Smoke test passed: host/origin checks, pairing, file path confinement${symlinkChecked ? ' including symlinks' : ' (symlink assertions SKIPPED)'}, clipboard, audio relay, and logout`);
 } finally {
   child.kill();
   await fs.rm(path.join(root, 'shared', 'smoke-test'), { recursive: true, force: true });

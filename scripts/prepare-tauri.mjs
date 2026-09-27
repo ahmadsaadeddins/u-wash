@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import manifest from '../assets.cjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tauriDir = path.join(root, 'src-tauri');
@@ -14,7 +15,7 @@ const assetsDir = path.join(tauriDir, 'resources', 'public');
 const binaryDir = path.join(tauriDir, 'binaries');
 fs.mkdirSync(assetsDir, { recursive: true });
 fs.mkdirSync(binaryDir, { recursive: true });
-for (const file of ['index.html', 'app.js', 'style.css', 'audio-worklet.js']) {
+for (const file of Object.values(manifest.publicAssets)) {
   fs.copyFileSync(path.join(root, 'public', file), path.join(assetsDir, file));
 }
 

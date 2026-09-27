@@ -10,6 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import selfsigned from 'selfsigned';
 import { WebSocketServer, WebSocket } from 'ws';
+import manifest from './assets.cjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.UWASH_DATA_DIR || here;
@@ -144,8 +145,10 @@ async function handleRequest(req, res) {
       if (req.method !== 'GET' && !sameOrigin(req)) return send(res, 403, { error: 'Invalid origin' });
       if (url.pathname === '/api/logout' && req.method === 'POST') {
         const token = sessionToken(req);
-        sessions.delete(token);
-        for (const client of clients) if (client.sessionToken === token) client.terminate();
+        if (token) {
+          sessions.delete(token);
+          for (const client of clients) if (client.sessionToken === token) client.terminate();
+        }
         res.writeHead(200, { 'Set-Cookie': 'uwash=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0', 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         return res.end(JSON.stringify({ ok: true }));
       }
@@ -202,7 +205,7 @@ async function handleRequest(req, res) {
       return send(res, 404, { error: 'Not found' });
     }
     if (req.method !== 'GET') return send(res, 405, { error: 'Method not allowed' });
-    const files = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/audio-worklet.js': 'audio-worklet.js' };
+    const files = manifest.publicAssets;
     const file = files[url.pathname];
     if (!file) return send(res, 404, { error: 'Not found' });
     const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
@@ -273,8 +276,25 @@ if (process.env.UWASH_PARENT_PID) {
   parentWatch.unref();
 }
 
-server.listen(port, listenHost, () => {
+function announceReady() {
   console.log(`\nu-wash is ready\nComputer: https://localhost:${port}\nPhone:    ${addresses.map(ip => `https://${ip}:${port}`).join(' or ') || 'connect to this computer on your local network'}\nPairing code: ${pin}\nShared files: ${sharedDir}\n`);
   console.log('Both devices must be on the same local network. On your phone, accept the local certificate warning once.');
-});
-desktopServer?.listen(desktopPort, '127.0.0.1');
+}
+function listenFailure(name, listenPort) {
+  return error => {
+    const reason = error.code === 'EADDRINUSE'
+      ? `is already in use. Close the other u-wash instance (for example a "npm start" server or another desktop app), or free the port, then start again`
+      : `could not be opened (${error.code || error.message})`;
+    console.error(`u-wash could not start: the ${name} port ${listenPort} ${reason}.`);
+    process.exit(1);
+  };
+}
+const listeners = desktopServer ? [[server, 'sharing', port], [desktopServer, 'desktop', desktopPort]] : [[server, 'sharing', port]];
+let started = 0;
+for (const [listener, name, listenPort] of listeners) {
+  listener.on('error', listenFailure(name, listenPort));
+  listener.listen(listenPort, listener === server ? listenHost : '127.0.0.1', () => {
+    // The "u-wash is ready" line is the sidecar readiness contract: print it only once every listener is bound.
+    if (++started === listeners.length) announceReady();
+  });
+}

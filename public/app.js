@@ -25,8 +25,8 @@ async function init() {
     $('downloadHint').hidden = !desktop;
     if (desktop) {
       const info = await api('/api/desktop');
-      phoneUrl = info.phoneUrls[0] || '';
-      $('phoneUrl').textContent = phoneUrl || 'No local network address found';
+      phoneUrl = info.phoneUrls.join('\n');
+      $('phoneUrl').textContent = info.phoneUrls.join('  or  ') || 'No local network address found';
       $('desktopPin').textContent = info.pin;
     }
     if (paired) { status('Connected'); connectSocket(); await Promise.all([refreshFiles(), refreshClipboard()]); }
@@ -177,6 +177,7 @@ function niceSize(bytes) { return bytes < 1024 ? `${bytes} B` : bytes < 1048576 
 async function refreshFiles() {
   try {
     const { files } = await api('/api/files'); const list = $('fileList'); list.replaceChildren();
+    $('fileStatus').textContent = '';
     if (!files.length) { const div = document.createElement('div'); div.className = 'empty'; div.textContent = 'No files yet. Add one to get started.'; list.append(div); return; }
     for (const file of files) {
       const row = document.createElement('div'); row.className = 'fileRow';
@@ -188,7 +189,7 @@ async function refreshFiles() {
       link.addEventListener('click', () => { if (desktopMode) $('downloadHint').textContent = 'Download started. Use Open Downloads folder to find it.'; });
       row.append(info, link); list.append(row);
     }
-  } catch (error) { $('uploadStatus').textContent = error.message; }
+  } catch (error) { $('fileStatus').textContent = `Could not list shared files: ${error.message}`; }
 }
 async function uploadFiles(input) {
   const files = Array.from(input.files || []);
