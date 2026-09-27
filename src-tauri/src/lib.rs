@@ -66,11 +66,17 @@ fn start(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     };
     std::fs::create_dir_all(&data_dir)?;
     let assets_dir = app.path().resource_dir()?.join("resources").join("public");
+    let cable_setup = if cfg!(debug_assertions) {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("vbcable").join("VBCABLE_Setup_x64.exe")
+    } else {
+        app.path().resource_dir()?.join("resources").join("vbcable").join("VBCABLE_Setup_x64.exe")
+    };
     let command = app
         .shell()
         .sidecar("uwash-server")?
         .env("UWASH_DATA_DIR", data_dir)
         .env("UWASH_ASSETS_DIR", assets_dir)
+        .env("UWASH_CABLE_SETUP", cable_setup)
         .env("UWASH_DESKTOP_PORT", "8766")
         .env("UWASH_PARENT_PID", std::process::id().to_string());
     let (mut events, child) = command.spawn()?;

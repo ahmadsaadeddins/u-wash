@@ -22,6 +22,7 @@ async function init() {
     $('logoutButton').hidden = !paired || desktop;
     $('desktopPanel').hidden = !desktop;
     $('openDownloads').hidden = !desktop;
+    $('installCable').hidden = !desktop;
     $('downloadHint').hidden = !desktop;
     if (desktop) {
       const info = await api('/api/desktop');
@@ -75,6 +76,10 @@ $('copyPhoneUrl').onclick = async () => {
 $('openDownloads').onclick = async () => {
   try { await api('/api/open-downloads', { method: 'POST' }); }
   catch (error) { $('downloadHint').textContent = `Could not open Downloads: ${error.message}`; }
+};
+$('installCable').onclick = async () => {
+  try { await api('/api/install-cable', { method: 'POST' }); $('routeStatus').textContent = 'VB-CABLE setup launched. Approve the admin prompt, finish its installer, then restart Windows.'; }
+  catch (error) { $('routeStatus').textContent = `Could not start the VB-CABLE setup: ${error.message}`; }
 };
 function displayClipboard(data) {
   latestClipboard = data.text || '';

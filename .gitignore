@@ -4,4 +4,4 @@ shared/
 src-tauri/target/
 src-tauri/binaries/*.exe
 src-tauri/resources/public/
-VBCABLE_Driver_Pack*.zip
+src-tauri/resources/vbcable/

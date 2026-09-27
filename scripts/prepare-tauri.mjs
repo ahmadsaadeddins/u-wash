@@ -19,6 +19,16 @@ for (const file of Object.values(manifest.publicAssets)) {
   fs.copyFileSync(path.join(root, 'public', file), path.join(assetsDir, file));
 }
 
+// Ship the unmodified VB-CABLE pack (donationware, redistributed as-is per its
+// license) so the desktop app can launch its own installer on demand.
+const cableDir = path.join(tauriDir, 'resources', 'vbcable');
+fs.rmSync(cableDir, { recursive: true, force: true });
+fs.mkdirSync(cableDir, { recursive: true });
+const cableZip = path.join(root, 'VBCABLE_Driver_Pack45.zip');
+const cableExtract = spawnSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${cableZip}' -DestinationPath '${cableDir}' -Force`], { stdio: 'pipe' });
+if (cableExtract.status !== 0) throw new Error(`VB-CABLE pack extraction failed (${cableExtract.status ?? cableExtract.error?.message})`);
+if (!fs.existsSync(path.join(cableDir, 'VBCABLE_Setup_x64.exe'))) throw new Error('VB-CABLE pack is missing VBCABLE_Setup_x64.exe');
+
 const binary = path.join(binaryDir, `uwash-server-${triple}.exe`);
 const pkgScript = path.join(root, 'node_modules', '@yao-pkg', 'pkg', 'lib-es5', 'bin.js');
 const result = spawnSync(process.execPath, [pkgScript, path.join(root, 'server.js'), '--target', 'node24-win-x64', '--output', binary], { cwd: root, stdio: 'inherit' });

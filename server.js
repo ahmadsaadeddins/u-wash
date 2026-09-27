@@ -21,6 +21,7 @@ const publicDir = process.env.UWASH_ASSETS_DIR || path.join(here, 'public');
 const port = Number(process.env.PORT || 8765);
 const listenHost = process.env.UWASH_HOST || '0.0.0.0';
 const desktopPort = Number(process.env.UWASH_DESKTOP_PORT || 0);
+const cableSetup = process.env.UWASH_CABLE_SETUP || '';
 const desktopHost = `127.0.0.1:${desktopPort}`;
 const pin = String(process.env.UWASH_PIN || crypto.randomInt(100000, 1000000));
 const sessionLifetimeMs = 24 * 60 * 60 * 1000;
@@ -159,6 +160,17 @@ async function handleRequest(req, res) {
           const explorer = spawn('explorer.exe', [folder], { detached: true, stdio: 'ignore' });
           explorer.once('error', reject);
           explorer.once('spawn', () => { explorer.unref(); resolve(); });
+        });
+        return send(res, 200, { ok: true });
+      }
+      if (url.pathname === '/api/install-cable' && req.method === 'POST') {
+        if (!isDesktop(req) || process.platform !== 'win32') return send(res, 403, { error: 'Desktop only' });
+        if (!cableSetup || !fs.existsSync(cableSetup)) return send(res, 404, { error: 'The bundled VB-CABLE setup was not found' });
+        // The driver setup needs administrator rights; RunAs raises the UAC prompt.
+        await new Promise((resolve, reject) => {
+          const child = spawn('powershell', ['-NoProfile', '-Command', `Start-Process -FilePath '${cableSetup}' -Verb RunAs`], { detached: true, stdio: 'ignore' });
+          child.once('error', reject);
+          child.once('spawn', () => { child.unref(); resolve(); });
         });
         return send(res, 200, { ok: true });
       }

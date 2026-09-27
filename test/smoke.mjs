@@ -35,6 +35,7 @@ try {
   const pair = await request('POST', '/api/pair', Buffer.from('{"pin":"123456"}'));
   assert.equal(pair.status, 200);
   assert.equal((await request('POST', '/api/open-downloads')).status, 403);
+  assert.equal((await request('POST', '/api/install-cable')).status, 403);
   const text = Buffer.from('hello from phone');
   assert.equal((await request('PUT', '/api/upload?path=smoke-test%2Fhello.txt', text, 'application/octet-stream')).status, 200);
   const files = JSON.parse((await request('GET', '/api/files')).body);
