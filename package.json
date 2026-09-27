@@ -1,0 +1,18 @@
+{
+  "name": "u-wash",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local phone microphone, file and clipboard sharing",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "selfsigned": "^5.5.0",
+    "ws": "^8.22.0"
+  }
+}
