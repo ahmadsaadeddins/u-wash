@@ -1,6 +1,6 @@
 [package]
 name = "uwash_desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Phone microphone, files, and clipboard on the local network"
 authors = ["u-wash"]
 license = ""
